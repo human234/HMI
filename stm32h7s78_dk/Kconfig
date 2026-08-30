@@ -1,0 +1,8 @@
+mainmenu "controller"
+  config STM32_HAL_TIM
+    default y
+    bool
+    select USE_STM32_HAL_TIM
+    select USE_STM32_HAL_TIM_EX
+
+source "Kconfig.zephyr"
