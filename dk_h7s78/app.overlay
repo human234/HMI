@@ -1,80 +1,30 @@
-#include "zephyr/dt-bindings/pwm/pwm.h"
-
 /*
- * Port of stm32_h743zi app.overlay to the STM32H7S78-DK.
+ * combined_h7s78 -- STM32H7S78-DK touchscreen SVPWM controller
  *
- * Display/touch: the DK's native LTDC RGB panel (800x480) and GT911 I2C
- * touch controller are already enabled by the board dts
- * (stm32h7s78_dk-common.dtsi) with zephyr,display / zephyr,touch chosen
- * properties, so no display nodes are needed here. The ILI9341/XPT2046
- * nodes from the H743 board are dropped.
+ * Merges the LVGL display/touch UI (dk_h7s78) with the SPI4 slave link
+ * (h7s78_spi_slave). The touchscreen sets the SVPWM reference (electrical
+ * frequency + voltage magnitude); the SPI slave packs it into an 8-byte
+ * frame, asserts PD12, and the G474RE SPI1 master clocks it and drives its
+ * TIM1 SVPWM controller.
  *
- * Pin conflicts resolved vs. the H743 mapping:
- *   - tim1_ch1n PE8 -> PA7   (PE8 is uart7 TX on the DK)
- *   - tim1_ch2  PE11 -> PC3 (PE11 is ltdc_vsync on the DK)
- *   - spi4 disabled         (PE13 is needed by tim1_ch3; spi4_miso_pe13)
+ * Display/touch: the DK's native LTDC RGB panel (800x480) and GT911 I2C touch
+ * controller are already enabled by the board dts, so no display nodes are
+ * needed here.
+ *
+ * SPI4 SLAVE on the Pmod CN4 connector:
+ *   pin2 MOSI = PE14 (SPI4_MOSI)
+ *   pin3 MISO = PE13 (SPI4_MISO)
+ *   pin4 SCK  = PE12 (SPI4_SCK)
+ *   pin1 CS   = PE4  / software slave-select (SSM=1): slave is always
+ *                    selected; no NSS AF needed.
+ *
+ * NOTE: The dk_h7s78 demo previously muxed TIM1_CH3 onto PE13 for a leftover
+ * SVPWM demo on the H7S78. That demo is dropped so PE13 is free for
+ * SPI4_MISO; the real SVPWM runs on the G474RE (g474_svpwm project).
  */
 
-&timers1 {
-    status = "okay";
-    st,countermode = <0x20>;
-    st,deadtime = <255>;
-
-    pwm1: pwm {
-        status = "okay";
-
-        pinctrl-0 = <
-            &tim1_ch1_pe9
-            &tim1_ch1n_pa7
-
-            &tim1_ch2_pc3
-            &tim1_ch2n_pe10
-
-            &tim1_ch3_pe13
-            &tim1_ch3n_pb1
-        >;
-        pinctrl-names = "default";
-    };
-};
-
-/* Board enables spi4 by default (Pmod); disable it to free PE13 for TIM1 CH3 */
 &spi4 {
-    status = "disabled";
-};
-
-/ {
-    aliases {
-        /* parser.c drives this PWM from parsed UART commands;
-         * referenced in code as DT_ALIAS(pwm_led0) which resolves to pwm-led0 */
-        pwm-led0 = &pwmled0_pwm_led0;
-    };
-
-    pwmled0: pwmled0 {
-        compatible = "pwm-leds";
-
-        pwmled0_pwm_led0: pwm_led0 {
-            /* channel 2 = TIM3_CH2 on PB5 (enabled by board dts);
-             * period/pulse are overridden at runtime by parser.c */
-            pwms = <&pwm3 2 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
-        };
-    };
-
-    zephyr,user {
-        /* H7S78 has no ADC3; use ADC1 channel 6 on PF12 (Arduino A3),
-         * pinctrl + adc1 node already enabled by the board dts */
-        io-channels = <&adc1 6>;
-    };
-};
-
-&adc1 {
-    #address-cells = <1>;
-    #size-cells = <0>;
-
-    channel@6 {
-        reg = <6>;
-        zephyr,gain = "ADC_GAIN_1";
-        zephyr,reference = "ADC_REF_INTERNAL";
-        zephyr,acquisition-time = <ADC_ACQ_TIME_MAX>;
-        zephyr,resolution = <12>;
-    };
+	status = "okay";
+	pinctrl-0 = <&spi4_sck_pe12 &spi4_miso_pe13 &spi4_mosi_pe14>;
+	pinctrl-names = "default";
 };

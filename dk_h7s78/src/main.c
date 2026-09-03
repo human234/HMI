@@ -1,19 +1,85 @@
+#include <string.h>
 #include <lvgl.h>
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/pwm.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/device.h>
 #include "display/lv_display.h"
 #include "hmi.h"
+#include "slave_ctl.h"
+
+#define SPI_DEV_NODE DT_NODELABEL(spi4)
+
+#define SPI_FREQ_HZ 1000000U
+
+#define LOOP_MS 50u
+
+static const struct device *spi_dev;
+
+static uint8_t rx_buf[SLAVE_CTL_LEN];
+
+static struct spi_buf tx_spi_buf;
+static struct spi_buf rx_spi_buf;
+static const struct spi_buf_set rx = { &rx_spi_buf, 1 };
+static const struct spi_buf_set tx = { &tx_spi_buf, 1 };
+
+/* Slave, 8-bit word, MSB first, Motorola mode 0. Software slave-select
+ * (SSM=1): the peripheral is always selected and each full-duplex burst
+ * (clocked by the G474 master) shifts the latest TX frame onto MISO. */
+static const struct spi_config spi_cfg = {
+    .frequency = SPI_FREQ_HZ,
+    .operation = SPI_OP_MODE_SLAVE | SPI_WORD_SET(8) |
+                 SPI_TRANSFER_MSB,
+    .slave = 0,
+    .cs = { .gpio = { .port = NULL, .pin = 0, .dt_flags = 0 } },
+};
 
 int main(void)
 {
     const struct device *display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
-    hmi_create_complex(lv_screen_active());
+
+    spi_dev = DEVICE_DT_GET(SPI_DEV_NODE);
+    if (!device_is_ready(spi_dev)) {
+        printk("SPI4 slave not ready\n");
+        return -1;
+    }
+
+    if (slave_ctl_init() != 0) {
+        printk("slave_ctl init failed\n");
+        return -1;
+    }
+
+    hmi_create_control(lv_screen_active());
     display_blanking_off(display_dev);
 
-    // update ui screen
+    printk("SVPWM touchscreen controller ready (SPI4 slave + LVGL UI)\n");
+
     while (1) {
         lv_timer_handler();
-        k_sleep(K_MSEC(100));
+
+        /* Drive the SPI slave from the current UI state in THIS thread, so
+         * the frame update (pack + PD12 notify) and the subsequent transceive
+         * are synchronized -- same design as the verified h7s78_spi_slave
+         * demo.  START/STOP is encoded as persistent per-loop frame state, so
+         * the master reliably toggles the PWM on/off and applies the latest
+         * reference, and start/stop remains fully reversible. */
+        slave_ctl_set_state(hmi_ctl_get_running() ? SLAVE_CTL_CMD_START
+                                                  : SLAVE_CTL_CMD_STOP,
+                            hmi_ctl_get_frequency(),
+                            hmi_ctl_get_magnitude());
+
+        memset(rx_buf, 0, sizeof(rx_buf));
+        rx_spi_buf.buf = rx_buf;
+        rx_spi_buf.len = sizeof(rx_buf);
+        tx_spi_buf.buf = slave_ctl_frame();
+        tx_spi_buf.len = SLAVE_CTL_LEN;
+
+        int ret = spi_transceive(spi_dev, &spi_cfg, &tx, &rx);
+        if (ret != 0) {
+            printk("slave spi_transceive error: %d\n", ret);
+        }
+
+        k_sleep(K_MSEC(LOOP_MS));
     }
+    return 0;
 }

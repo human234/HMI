@@ -1275,3 +1275,274 @@ void hmi_create(lv_obj_t * parent)
     subset_switch_page(0);
     lv_timer_create(subset_update_timer, 50, NULL);
 }
+
+//============================================================================
+// SVPWM controller screen -- drives the G474RE over the SPI4 slave link
+//============================================================================
+
+typedef struct {
+    lv_obj_t * root;
+
+    hmi_gauge_t * gauge_freq;
+    hmi_gauge_t * gauge_mag;
+
+    hmi_slider_t * slider_freq;
+    hmi_slider_t * slider_mag;
+
+    hmi_btn_t * btn_start;
+    hmi_btn_t * btn_stop;
+    hmi_btn_t * btn_reset;
+
+    lv_obj_t * info_label;
+    lv_obj_t * status_label;
+
+    float freq;
+    float mag;
+    bool running;
+} hmi_control_t;
+
+static hmi_control_t ctl;
+
+/* Accessors: the app (main.c) reads the current control state each SPI
+ * exchange, so the frame update and the transceive stay in one thread (same
+ * design as the verified h7s78_spi_slave demo). */
+float hmi_ctl_get_frequency(void) { return ctl.freq; }
+float hmi_ctl_get_magnitude(void) { return ctl.mag; }
+bool  hmi_ctl_get_running(void)   { return ctl.running; }
+
+static void control_refresh_timer(lv_timer_t * timer)
+{
+    (void)timer;
+    hmi_gauge_set_value(ctl.gauge_freq, ctl.freq);
+    hmi_gauge_set_value(ctl.gauge_mag, ctl.mag);
+}
+
+static void control_on_freq_change(hmi_slider_t * slider, float value)
+{
+    (void)slider;
+    ctl.freq = value;
+    char buf[48];
+    snprintf(buf, sizeof(buf), LV_SYMBOL_SETTINGS " FREQ -> %.1f Hz", value);
+    lv_label_set_text(ctl.info_label, buf);
+    lv_obj_set_style_text_color(ctl.info_label, COLOR_ACCENT, 0);
+}
+
+static void control_on_mag_change(hmi_slider_t * slider, float value)
+{
+    (void)slider;
+    ctl.mag = value;
+    char buf[48];
+    snprintf(buf, sizeof(buf), LV_SYMBOL_SETTINGS " MAG -> %.2f V", value);
+    lv_label_set_text(ctl.info_label, buf);
+    lv_obj_set_style_text_color(ctl.info_label, COLOR_ACCENT, 0);
+}
+
+static void control_on_start(hmi_btn_t * btn, lv_event_t * e)
+{
+    (void)e;
+    ctl.running = true;
+    hmi_btn_set_state(btn, HMI_BTN_ACTIVE);
+    hmi_btn_set_state(ctl.btn_stop, HMI_BTN_IDLE);
+    hmi_btn_set_state(ctl.btn_reset, HMI_BTN_IDLE);
+    lv_label_set_text(ctl.status_label, LV_SYMBOL_PLAY " RUNNING");
+    lv_obj_set_style_text_color(ctl.status_label, COLOR_OK, 0);
+    lv_label_set_text(ctl.info_label, LV_SYMBOL_PLAY " SYNC: start requested");
+    lv_obj_set_style_text_color(ctl.info_label, COLOR_OK, 0);
+}
+
+static void control_on_stop(hmi_btn_t * btn, lv_event_t * e)
+{
+    (void)e;
+    ctl.running = false;
+    hmi_btn_set_state(btn, HMI_BTN_ACTIVE);
+    hmi_btn_set_state(ctl.btn_start, HMI_BTN_IDLE);
+    hmi_btn_set_state(ctl.btn_reset, HMI_BTN_IDLE);
+    lv_label_set_text(ctl.status_label, LV_SYMBOL_STOP " STOPPED");
+    lv_obj_set_style_text_color(ctl.status_label, COLOR_ERROR, 0);
+    lv_label_set_text(ctl.info_label, LV_SYMBOL_STOP " SYNC: stop requested");
+    lv_obj_set_style_text_color(ctl.info_label, COLOR_ERROR, 0);
+}
+
+static void control_on_reset(hmi_btn_t * btn, lv_event_t * e)
+{
+    (void)e;
+    ctl.freq = 60.0f;
+    ctl.mag = 4.0f;
+    ctl.running = true;
+    hmi_btn_set_state(btn, HMI_BTN_ACTIVE);
+    hmi_btn_set_state(ctl.btn_start, HMI_BTN_IDLE);
+    hmi_btn_set_state(ctl.btn_stop, HMI_BTN_IDLE);
+
+    hmi_slider_set_value(ctl.slider_freq, ctl.freq);
+    hmi_slider_set_value(ctl.slider_mag, ctl.mag);
+
+    lv_label_set_text(ctl.status_label, LV_SYMBOL_REFRESH " RESET 60Hz / 4V");
+    lv_obj_set_style_text_color(ctl.status_label, COLOR_WARN, 0);
+    lv_label_set_text(ctl.info_label, LV_SYMBOL_REFRESH " Reset reference -> 60 Hz, 4.0 V");
+    lv_obj_set_style_text_color(ctl.info_label, COLOR_WARN, 0);
+}
+
+static lv_obj_t * control_badge(lv_obj_t * parent, const char * text, lv_color_t color)
+{
+    lv_obj_t * badge = lv_obj_create(parent);
+    lv_obj_remove_style_all(badge);
+    lv_obj_set_style_bg_color(badge, COLOR_PANEL, 0);
+    lv_obj_set_style_radius(badge, 10, 0);
+    lv_obj_set_style_pad_hor(badge, 12, 0);
+    lv_obj_set_height(badge, 30);
+
+    lv_obj_t * lbl = lv_label_create(badge);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, color, 0);
+    lv_obj_center(lbl);
+    return badge;
+}
+
+void hmi_create_control(lv_obj_t * parent)
+{
+    memset(&ctl, 0, sizeof(ctl));
+    lv_obj_set_style_bg_color(parent, COLOR_BG, 0);
+
+    lv_obj_t * cont = lv_obj_create(parent);
+    lv_obj_remove_style_all(cont);
+    lv_obj_set_size(cont, lv_pct(100), lv_pct(100));
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(cont, 8, 0);
+    lv_obj_set_style_pad_row(cont, 8, 0);
+    ctl.root = cont;
+
+    /* Header */
+    lv_obj_t * header = lv_obj_create(cont);
+    lv_obj_remove_style_all(header);
+    lv_obj_set_size(header, lv_pct(100), 56);
+    lv_obj_set_flex_grow(header, 0);
+    lv_obj_set_style_bg_color(header, COLOR_PANEL, 0);
+    lv_obj_set_style_radius(header, 12, 0);
+    lv_obj_set_style_pad_hor(header, 14, 0);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t * title = lv_label_create(header);
+    lv_label_set_text(title, LV_SYMBOL_CHARGE "  SVPWM CONTROLLER");
+    lv_obj_set_style_text_color(title, COLOR_ACCENT, 0);
+
+    lv_obj_t * header_right = lv_obj_create(header);
+    lv_obj_set_style_bg_opa(header_right, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(header_right, 0, 0);
+    lv_obj_set_style_pad_all(header_right, 0, 0);
+    lv_obj_remove_flag(header_right, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(header_right, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header_right, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(header_right, 8, 0);
+
+    ctl.status_label = lv_label_create(header_right);
+    lv_label_set_text(ctl.status_label, LV_SYMBOL_STOP " IDLE");
+    lv_obj_set_style_text_color(ctl.status_label, COLOR_DIM, 0);
+
+    control_badge(header_right, "SPI4 SLAVE", COLOR_OK);
+    control_badge(header_right, "G474RE", COLOR_ACCENT);
+
+    /* Gauges row */
+    lv_obj_t * gauge_row = lv_obj_create(cont);
+    lv_obj_remove_style_all(gauge_row);
+    lv_obj_set_size(gauge_row, lv_pct(100), lv_pct(100));
+    lv_obj_set_flex_grow(gauge_row, 1);
+    lv_obj_set_flex_flow(gauge_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(gauge_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    ctl.gauge_freq = hmi_gauge_create(gauge_row);
+    hmi_gauge_set_style(ctl.gauge_freq, HMI_GAUGE_STYLE_CYAN);
+    hmi_gauge_set_title(ctl.gauge_freq, "FREQUENCY");
+    hmi_gauge_set_unit(ctl.gauge_freq, "Hz");
+    hmi_gauge_set_range(ctl.gauge_freq, 0.0f, 400.0f);
+    hmi_gauge_set_precision(ctl.gauge_freq, 1);
+    hmi_gauge_set_tick_count(ctl.gauge_freq, 9);
+    hmi_gauge_set_value(ctl.gauge_freq, 60.0f);
+    lv_obj_set_size(hmi_gauge_get_obj(ctl.gauge_freq), lv_pct(45), lv_pct(100));
+
+    ctl.gauge_mag = hmi_gauge_create(gauge_row);
+    hmi_gauge_set_style(ctl.gauge_mag, HMI_GAUGE_STYLE_PINK);
+    hmi_gauge_set_title(ctl.gauge_mag, "MAGNITUDE");
+    hmi_gauge_set_unit(ctl.gauge_mag, "V");
+    hmi_gauge_set_range(ctl.gauge_mag, 0.0f, 5.0f);
+    hmi_gauge_set_precision(ctl.gauge_mag, 2);
+    hmi_gauge_set_tick_count(ctl.gauge_mag, 6);
+    hmi_gauge_set_value(ctl.gauge_mag, 4.0f);
+    lv_obj_set_size(hmi_gauge_get_obj(ctl.gauge_mag), lv_pct(45), lv_pct(100));
+
+    /* Control sliders */
+    lv_obj_t * slider_row = lv_obj_create(cont);
+    lv_obj_remove_style_all(slider_row);
+    lv_obj_set_size(slider_row, lv_pct(100), 96);
+    lv_obj_set_flex_grow(slider_row, 0);
+    lv_obj_set_style_pad_column(slider_row, 8, 0);
+    lv_obj_set_flex_flow(slider_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(slider_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    ctl.slider_freq = hmi_slider_create(slider_row);
+    hmi_slider_set_title(ctl.slider_freq, "FREQUENCY");
+    hmi_slider_set_unit(ctl.slider_freq, "Hz");
+    hmi_slider_set_range(ctl.slider_freq, 0.0f, 400.0f);
+    hmi_slider_set_precision(ctl.slider_freq, 1);
+    hmi_slider_set_color(ctl.slider_freq, COLOR_ACCENT);
+    hmi_slider_set_value(ctl.slider_freq, 60.0f);
+    hmi_slider_on_change(ctl.slider_freq, control_on_freq_change);
+    lv_obj_set_size(hmi_slider_get_obj(ctl.slider_freq), lv_pct(46), lv_pct(100));
+
+    ctl.slider_mag = hmi_slider_create(slider_row);
+    hmi_slider_set_title(ctl.slider_mag, "VOLTAGE MAG");
+    hmi_slider_set_unit(ctl.slider_mag, "V");
+    hmi_slider_set_range(ctl.slider_mag, 0.0f, 5.0f);
+    hmi_slider_set_precision(ctl.slider_mag, 2);
+    hmi_slider_set_color(ctl.slider_mag, COLOR_ACCENT);
+    hmi_slider_set_value(ctl.slider_mag, 4.0f);
+    hmi_slider_on_change(ctl.slider_mag, control_on_mag_change);
+    lv_obj_set_size(hmi_slider_get_obj(ctl.slider_mag), lv_pct(46), lv_pct(100));
+
+    /* Buttons */
+    lv_obj_t * btn_row = lv_obj_create(cont);
+    lv_obj_remove_style_all(btn_row);
+    lv_obj_set_size(btn_row, lv_pct(100), 64);
+    lv_obj_set_flex_grow(btn_row, 0);
+    lv_obj_set_style_pad_column(btn_row, 8, 0);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    ctl.btn_start = hmi_btn_create(btn_row);
+    hmi_btn_set_text(ctl.btn_start, "START");
+    hmi_btn_set_led_enable(ctl.btn_start, true);
+    hmi_btn_set_led_color(ctl.btn_start, COLOR_OK);
+    hmi_btn_set_pulse_enable(ctl.btn_start, true);
+    hmi_btn_on_click(ctl.btn_start, control_on_start);
+    lv_obj_set_size(hmi_btn_get_obj(ctl.btn_start), lv_pct(30), lv_pct(90));
+
+    ctl.btn_stop = hmi_btn_create(btn_row);
+    hmi_btn_set_text(ctl.btn_stop, "STOP");
+    hmi_btn_set_led_enable(ctl.btn_stop, true);
+    hmi_btn_set_led_color(ctl.btn_stop, COLOR_ERROR);
+    hmi_btn_on_click(ctl.btn_stop, control_on_stop);
+    lv_obj_set_size(hmi_btn_get_obj(ctl.btn_stop), lv_pct(30), lv_pct(90));
+
+    ctl.btn_reset = hmi_btn_create(btn_row);
+    hmi_btn_set_text(ctl.btn_reset, "RESET");
+    hmi_btn_set_led_enable(ctl.btn_reset, true);
+    hmi_btn_set_led_color(ctl.btn_reset, COLOR_WARN);
+    hmi_btn_on_click(ctl.btn_reset, control_on_reset);
+    lv_obj_set_size(hmi_btn_get_obj(ctl.btn_reset), lv_pct(30), lv_pct(90));
+
+    /* Info footer */
+    ctl.info_label = lv_label_create(cont);
+    lv_obj_set_size(ctl.info_label, lv_pct(100), 24);
+    lv_obj_set_flex_grow(ctl.info_label, 0);
+    lv_label_set_long_mode(ctl.info_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(ctl.info_label, lv_pct(100));
+    lv_label_set_text(ctl.info_label, LV_SYMBOL_DRIVE " Drag sliders to set SVPWM reference, then START");
+    lv_obj_set_style_text_color(ctl.info_label, COLOR_DIM, 0);
+
+    ctl.freq = 60.0f;
+    ctl.mag = 4.0f;
+    ctl.running = false;
+
+    /* Reflect real commanded values on the gauges. */
+    lv_timer_create((lv_timer_cb_t)control_refresh_timer, 100, NULL);
+}
