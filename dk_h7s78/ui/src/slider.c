@@ -270,8 +270,6 @@ lv_obj_t * hmi_slider_get_obj(const hmi_slider_t * slider)
 
 #if 1
 
-#include <math.h>
-
 typedef struct {
     hmi_slider_t * slider;
     lv_obj_t * value_label;

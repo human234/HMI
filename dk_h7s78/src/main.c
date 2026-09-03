@@ -12,7 +12,7 @@
 
 #define SPI_FREQ_HZ 1000000U
 
-#define LOOP_MS 50u
+#define LVGL_TICK_MS 5u
 
 static const struct device *spi_dev;
 
@@ -57,29 +57,25 @@ int main(void)
     while (1) {
         lv_timer_handler();
 
-        /* Drive the SPI slave from the current UI state in THIS thread, so
-         * the frame update (pack + PD12 notify) and the subsequent transceive
-         * are synchronized -- same design as the verified h7s78_spi_slave
-         * demo.  START/STOP is encoded as persistent per-loop frame state, so
-         * the master reliably toggles the PWM on/off and applies the latest
-         * reference, and start/stop remains fully reversible. */
-        slave_ctl_set_state(hmi_ctl_get_running() ? SLAVE_CTL_CMD_START
-                                                  : SLAVE_CTL_CMD_STOP,
-                            hmi_ctl_get_frequency(),
-                            hmi_ctl_get_magnitude());
+        if (hmi_ctl_state_changed()) {
+            slave_ctl_set_state(hmi_ctl_get_running() ? SLAVE_CTL_CMD_START
+                                                      : SLAVE_CTL_CMD_STOP,
+                                hmi_ctl_get_frequency(),
+                                hmi_ctl_get_magnitude());
 
-        memset(rx_buf, 0, sizeof(rx_buf));
-        rx_spi_buf.buf = rx_buf;
-        rx_spi_buf.len = sizeof(rx_buf);
-        tx_spi_buf.buf = slave_ctl_frame();
-        tx_spi_buf.len = SLAVE_CTL_LEN;
+            memset(rx_buf, 0, sizeof(rx_buf));
+            rx_spi_buf.buf = rx_buf;
+            rx_spi_buf.len = sizeof(rx_buf);
+            tx_spi_buf.buf = slave_ctl_frame();
+            tx_spi_buf.len = SLAVE_CTL_LEN;
 
-        int ret = spi_transceive(spi_dev, &spi_cfg, &tx, &rx);
-        if (ret != 0) {
-            printk("slave spi_transceive error: %d\n", ret);
+            int ret = spi_transceive(spi_dev, &spi_cfg, &tx, &rx);
+            if (ret != 0) {
+                printk("slave spi_transceive error: %d\n", ret);
+            }
         }
 
-        k_sleep(K_MSEC(LOOP_MS));
+        k_sleep(K_MSEC(LVGL_TICK_MS));
     }
     return 0;
 }

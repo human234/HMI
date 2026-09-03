@@ -1302,6 +1302,7 @@ typedef struct {
 } hmi_control_t;
 
 static hmi_control_t ctl;
+static volatile bool hmi_ctl_dirty;
 
 /* Accessors: the app (main.c) reads the current control state each SPI
  * exchange, so the frame update and the transceive stay in one thread (same
@@ -1309,6 +1310,15 @@ static hmi_control_t ctl;
 float hmi_ctl_get_frequency(void) { return ctl.freq; }
 float hmi_ctl_get_magnitude(void) { return ctl.mag; }
 bool  hmi_ctl_get_running(void)   { return ctl.running; }
+
+bool hmi_ctl_state_changed(void)
+{
+    if (hmi_ctl_dirty) {
+        hmi_ctl_dirty = false;
+        return true;
+    }
+    return false;
+}
 
 static void control_refresh_timer(lv_timer_t * timer)
 {
@@ -1321,6 +1331,7 @@ static void control_on_freq_change(hmi_slider_t * slider, float value)
 {
     (void)slider;
     ctl.freq = value;
+    hmi_ctl_dirty = true;
     char buf[48];
     snprintf(buf, sizeof(buf), LV_SYMBOL_SETTINGS " FREQ -> %.1f Hz", value);
     lv_label_set_text(ctl.info_label, buf);
@@ -1331,6 +1342,7 @@ static void control_on_mag_change(hmi_slider_t * slider, float value)
 {
     (void)slider;
     ctl.mag = value;
+    hmi_ctl_dirty = true;
     char buf[48];
     snprintf(buf, sizeof(buf), LV_SYMBOL_SETTINGS " MAG -> %.2f V", value);
     lv_label_set_text(ctl.info_label, buf);
@@ -1341,6 +1353,7 @@ static void control_on_start(hmi_btn_t * btn, lv_event_t * e)
 {
     (void)e;
     ctl.running = true;
+    hmi_ctl_dirty = true;
     hmi_btn_set_state(btn, HMI_BTN_ACTIVE);
     hmi_btn_set_state(ctl.btn_stop, HMI_BTN_IDLE);
     hmi_btn_set_state(ctl.btn_reset, HMI_BTN_IDLE);
@@ -1354,6 +1367,7 @@ static void control_on_stop(hmi_btn_t * btn, lv_event_t * e)
 {
     (void)e;
     ctl.running = false;
+    hmi_ctl_dirty = true;
     hmi_btn_set_state(btn, HMI_BTN_ACTIVE);
     hmi_btn_set_state(ctl.btn_start, HMI_BTN_IDLE);
     hmi_btn_set_state(ctl.btn_reset, HMI_BTN_IDLE);
@@ -1369,6 +1383,7 @@ static void control_on_reset(hmi_btn_t * btn, lv_event_t * e)
     ctl.freq = 60.0f;
     ctl.mag = 4.0f;
     ctl.running = true;
+    hmi_ctl_dirty = true;
     hmi_btn_set_state(btn, HMI_BTN_ACTIVE);
     hmi_btn_set_state(ctl.btn_start, HMI_BTN_IDLE);
     hmi_btn_set_state(ctl.btn_stop, HMI_BTN_IDLE);

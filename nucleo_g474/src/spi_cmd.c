@@ -48,7 +48,6 @@ LOG_MODULE_REGISTER(spi_cmd, LOG_LEVEL_INF);
 
 #define CMD_STACK_SIZE 1024u
 #define CMD_PRIO       1u
-#define POLL_MS        50u   /* periodic poll fallback (ms) */
 
 static const struct device *spi_dev;
 static const struct device *notify_dev;
@@ -156,11 +155,8 @@ static void cmd_thread(void *a, void *b, void *c)
     memset(tx_buf, 0, sizeof(tx_buf));
 
     while (1) {
-        /* Wake immediately on a notify edge (prompt), but also poll every
-         * POLL_MS so the link recovers even if an edge is missed or the
-         * slave updates just after we read.  This never deadlocks: the
-         * slave's blocking transceive completes on our next clock. */
-        k_sem_take(&cmd_sem, K_MSEC(POLL_MS));
+        /* Wake immediately on a notify edge from the slave (PD12 -> PC7). */
+        k_sem_take(&cmd_sem, K_FOREVER);
 
         int ret = spi_transceive(spi_dev, &spi_cfg, &tx, &rx);
         if (ret != 0) {
@@ -188,7 +184,7 @@ int spi_cmd_start(void)
 
     /* PC7 input pulled down; interrupt on rising edge (slave assert). */
     int ret = gpio_pin_configure(notify_dev, NOTIFY_PIN,
-                     GPIO_INPUT | GPIO_PULL_DOWN);
+                                 GPIO_INPUT | GPIO_PULL_DOWN);
     if (ret != 0) {
         LOG_ERR("notify pin config failed: %d", ret);
         return ret;
@@ -210,7 +206,7 @@ int spi_cmd_start(void)
     }
 
     k_thread_create(&cmd_thread_data, cmd_stack, CMD_STACK_SIZE,
-            cmd_thread, NULL, NULL, NULL, CMD_PRIO, 0, K_NO_WAIT);
+                    cmd_thread, NULL, NULL, NULL, CMD_PRIO, 0, K_NO_WAIT);
 
     LOG_INF("spi_cmd start: spi1 master + PC7 notify ready");
     return 0;

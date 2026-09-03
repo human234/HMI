@@ -18,6 +18,10 @@ float hmi_ctl_get_frequency(void);
 float hmi_ctl_get_magnitude(void);
 bool  hmi_ctl_get_running(void);
 
+/* Returns true once when the control state has changed since the last call.
+ * The main loop uses this to decide whether to do an SPI transceive. */
+bool  hmi_ctl_state_changed(void);
+
 #ifdef __cplusplus
 }
 #endif
