@@ -1443,14 +1443,19 @@ static void control_on_stop(hmi_btn_t * btn, lv_event_t * e)
 {
     (void)e;
     ctl.running = false;
+    ctl.freq = 0.0f;
+    ctl.mag = 0.0f;
     hmi_ctl_dirty = true;
     hmi_btn_set_state(btn, HMI_BTN_ACTIVE);
     hmi_btn_set_state(ctl.btn_start, HMI_BTN_IDLE);
     hmi_btn_set_state(ctl.btn_reset, HMI_BTN_IDLE);
     lv_label_set_text(ctl.status_label, LV_SYMBOL_STOP " DOWN");
     lv_obj_set_style_text_color(ctl.status_label, COLOR_ERROR, 0);
-    lv_label_set_text(ctl.info_label, LV_SYMBOL_STOP " SYNC: stop requested");
+    lv_label_set_text(ctl.info_label, LV_SYMBOL_STOP " SYNC: stop requested (ref zeroed)");
     lv_obj_set_style_text_color(ctl.info_label, COLOR_ERROR, 0);
+
+    hmi_slider_set_value(ctl.slider_freq, ctl.freq);
+    hmi_slider_set_value(ctl.slider_mag, ctl.mag);
 }
 
 static void control_on_reset(hmi_btn_t * btn, lv_event_t * e)

@@ -29,7 +29,6 @@ static const struct spi_buf_set tx = { &tx_spi_buf, 1 };
 #define SPI_PRIO       5u
 K_THREAD_STACK_DEFINE(spi_stack, SPI_STACK_SIZE);
 static struct k_thread spi_thread_data;
-static K_SEM_DEFINE(spi_req_sem, 0, 1);
 
 /* Slave, 8-bit word, MSB first, Motorola mode 0. Software slave-select
  * (SSM=1): the peripheral is always selected and each full-duplex burst
@@ -42,8 +41,16 @@ static const struct spi_config spi_cfg = {
     .cs = { .gpio = { .port = NULL, .pin = 0, .dt_flags = 0 } },
 };
 
-/* Dedicated SPI slave worker: wakes on UI state changes, packs the current
- * frame, and does the blocking transceive here so the GUI thread never blocks.
+/* Dedicated SPI slave worker: an always-listening loop that keeps the slave
+ * armed inside a blocking transceive nearly 100% of the time. When the UI
+ * state changes it packs the new frame and raises PD12 while the slave is
+ * actually armed; the G474 master is edge-driven and clocks the frame, and
+ * the transceive returns 0 only on a completed exchange. If the master never
+ * clocks (frame lost to the arm race), the interrupt-mode transceive times
+ * out (~264 ms), PD12 is lowered, and the change stays "dirty" so the next
+ * iteration raises a fresh edge and retries -- the link self-heals instead
+ * of wedging forever.
+ *
  * Reads the frame right before each exchange so it always carries the latest
  * committed state (matches the header's documented "SPI slave loop"). */
 static void spi_thread_fn(void *a, void *b, void *c)
@@ -52,13 +59,23 @@ static void spi_thread_fn(void *a, void *b, void *c)
     ARG_UNUSED(b);
     ARG_UNUSED(c);
 
-    while (1) {
-        k_sem_take(&spi_req_sem, K_FOREVER);
+    bool last_run = false;
+    float last_freq = 0.0f;
+    float last_mag = 0.0f;
 
-        slave_ctl_set_state(hmi_ctl_get_running() ? SLAVE_CTL_CMD_START
-                                                  : SLAVE_CTL_CMD_STOP,
-                            hmi_ctl_get_frequency(),
-                            hmi_ctl_get_magnitude());
+    while (1) {
+        bool run = hmi_ctl_get_running();
+        float freq = hmi_ctl_get_frequency();
+        float mag = hmi_ctl_get_magnitude();
+
+        bool dirty = (run != last_run) || (freq != last_freq) ||
+                     (mag != last_mag);
+
+        if (dirty) {
+            slave_ctl_pack_state(run ? SLAVE_CTL_CMD_START : SLAVE_CTL_CMD_STOP,
+                                 freq, mag);
+            slave_ctl_notify(true);
+        }
 
         memset(rx_buf, 0, sizeof(rx_buf));
         rx_spi_buf.buf = rx_buf;
@@ -67,7 +84,14 @@ static void spi_thread_fn(void *a, void *b, void *c)
         tx_spi_buf.len = SLAVE_CTL_LEN;
 
         int ret = spi_transceive(spi_dev, &spi_cfg, &tx, &rx);
-        if (ret != 0) {
+
+        slave_ctl_notify(false);
+
+        if (ret == 0) {
+            last_run = run;
+            last_freq = freq;
+            last_mag = mag;
+        } else if (ret != -ETIMEDOUT) {
             printk("slave spi_transceive error: %d\n", ret);
         }
     }
@@ -98,11 +122,6 @@ int main(void)
 
     while (1) {
         lv_timer_handler();
-
-        if (hmi_ctl_state_changed()) {
-            k_sem_give(&spi_req_sem);
-        }
-
         k_sleep(K_MSEC(LVGL_TICK_MS));
     }
     return 0;

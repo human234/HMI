@@ -221,18 +221,30 @@ void set_magnitude(float mag)
     v_mag = mag;
 }
 
-/* Stop the SVPWM: halt the timer and force every output to a safe (off)
- * compare value so the bridge is parked rather than free-running. */
+/* Stop the SVPWM: halt the timer, force every output to a safe (off)
+ * compare value and disable the main outputs so the bridge is truly dead
+ * rather than parked on the last running vector. */
 void svpwm_stop(void)
 {
     TIM1->CR1 &= ~TIM_CR1_CEN;
 
     /* 0 = full active-low -> gate driver off: safe bridge. */
     set_three_phase_pwm(0, 0, 0);
+
+    /* With CCxPE preload enabled and the counter stopped, the CCR writes
+     * above only land in the preload registers. Force an update event so the
+     * shadow compares are reloaded too. */
+    TIM1->EGR |= TIM_EGR_UG;
+
+    /* Disable the six PWM outputs (MOE=0): zero volts to the motor, not just
+     * a stopped switching pattern. */
+    TIM1->BDTR &= ~TIM_BDTR_MOE;
 }
 
-/* (Re)start the SVPWM: re-enable the timer and the rotating vector ISR. */
+/* (Re)start the SVPWM: re-enable the main outputs and the timer so the
+ * rotating vector ISR resumes. */
 void svpwm_start(void)
 {
+    TIM1->BDTR |= TIM_BDTR_MOE;
     TIM1->CR1 |= TIM_CR1_CEN;
 }
