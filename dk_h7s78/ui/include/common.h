@@ -16,9 +16,11 @@ extern "C" {
 #define COLOR_TEXT    lv_color_hex(0xE0E8FF)
 #define COLOR_DIM     lv_color_hex(0x6B7280)
 #define COLOR_ACCENT  lv_color_hex(0x00E5FF)
+#define COLOR_MAGENTA lv_color_hex(0xFF00AA)
 #define COLOR_OK      lv_color_hex(0x00FF41)
 #define COLOR_WARN    lv_color_hex(0xFF6B00)
 #define COLOR_ERROR   lv_color_hex(0xFF0055)
+#define COLOR_PANEL_BORDER lv_color_hex(0x2A2A4A)
 
 /*=============================================
  * Common math utilities (inline – zero overhead)

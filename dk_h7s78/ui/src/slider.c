@@ -122,13 +122,13 @@ static void hmi_slider_draw_event(lv_event_t * event)
     int32_t lbl_x = thumb_center_x - lbl_w / 2;
     if (lbl_x < coords.x1 + 4) lbl_x = coords.x1 + 4;
     if (lbl_x + lbl_w > coords.x2 - 4) lbl_x = coords.x2 - 4 - lbl_w;
-    lv_area_t lbl_area = { lbl_x, coords.y1 + 4, lbl_x + lbl_w, coords.y1 + 22 };
+    lv_area_t lbl_area = { lbl_x, coords.y1 + 2, lbl_x + lbl_w, coords.y1 + 18 };
     lv_draw_label(layer, &lbl, &lbl_area);
 
     if (strlen(slider->title) > 0) {
         lbl.text = slider->title;
         lbl.color = COLOR_DIM;
-        lv_area_t title_area = { coords.x1 + 6, coords.y1 + 24, coords.x1 + w - 6, coords.y1 + 40 };
+        lv_area_t title_area = { coords.x1 + 6, coords.y1 + 20, coords.x1 + w - 6, coords.y1 + 36 };
         lv_draw_label(layer, &lbl, &title_area);
     }
 }

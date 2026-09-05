@@ -577,12 +577,13 @@ void hmi_gauge_set_style(hmi_gauge_t * gauge, hmi_gauge_style_t style)
             gauge->start_angle  = 0.0f;
             gauge->end_angle    = 360.0f;
             gauge->needle_width = 7;
-            gauge->needle_offset = 42;
+            gauge->needle_offset = 28;
             gauge->outer_arc_width = 24;
             gauge->inner_arc_width = 16;
             gauge->tick_width   = 2;
             gauge->tick_inner   = 6;
             gauge->tick_outer   = 0;
+            gauge->accent  = lv_color_hex(0xFF00AA);   /* magenta, match MAG slider */
             break;
         case HMI_GAUGE_STYLE_AMBER:
             gauge->start_angle  = 180.0f;

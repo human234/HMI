@@ -204,21 +204,15 @@ static void ivc2_update_alarm(card_t * card)
     lv_obj_set_style_text_color(card->state, color, 0);
 }
 
-static const char * ivc2_state_text(ivc2_state_t state)
-{
-    switch (state) {
-        case IVC2_STATE_READY:   return "READY";
-        case IVC2_STATE_RUNNING: return "RUNNING";
-        case IVC2_STATE_WARNING: return "WARNING";
-        case IVC2_STATE_FAULT:   return "FAULT";
-        default:                 return "OFF";
-    }
-}
-
 static void ivc2_render_state(card_t * card)
 {
-    lv_label_set_text(card->state, ivc2_state_text(card->state_mode));
-    lv_obj_set_style_text_color(card->state, ivc2_state_color(card->state_mode), 0);
+    /* State text is intentionally NOT rendered: on the compact control cards
+     * the TOP_RIGHT state label overlaps the title/name, so it is hidden.
+     * State is still conveyed by the range-bar color (state_mode) instead. */
+    if (card->state) {
+        lv_label_set_text(card->state, "");
+        lv_obj_set_style_opa(card->state, LV_OPA_TRANSP, 0);
+    }
 }
 
 static void ivc2_animation_update(card_t * card)
@@ -228,8 +222,10 @@ static void ivc2_animation_update(card_t * card)
     float brightness = hmi_pulse_brightness(hmi_pulse_phase());
     lv_opa_t opacity = 80 + (lv_opa_t)(brightness * 120);
 
-    if (card->state_mode == IVC2_STATE_RUNNING) {
-        lv_obj_set_style_opa(card->state, opacity, 0);
+    /* State text is hidden; pulse the value label instead so the card still
+     * feels alive without the overlapping state readout. */
+    if (card->state_mode == IVC2_STATE_RUNNING && card->value) {
+        lv_obj_set_style_opa(card->value, opacity, 0);
     }
 }
 

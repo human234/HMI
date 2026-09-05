@@ -373,12 +373,17 @@ static void destroy_btn_draw(lv_event_t * e)
     lv_area_increase(&glow_a, 4, 4);
     lv_draw_rect(layer, &glow, &glow_a);
 
-    /* 6. Warning text */
+    /* 6. Warning text -- horizontally centered, keeping clear of the right LED */
     lv_draw_label_dsc_t label;
     lv_draw_label_dsc_init(&label);
-    label.text  = LV_SYMBOL_WARNING LV_SYMBOL_TRASH " DESTROY " LV_SYMBOL_TRASH LV_SYMBOL_WARNING;
-    label.color = lv_color_hex(0xFFFFFF);
-    lv_area_t la = { coords.x1 + 8, cy - 10, coords.x2 - 22 - 8, cy + 10 };
+    label.text    = LV_SYMBOL_WARNING LV_SYMBOL_TRASH " DESTROY " LV_SYMBOL_TRASH LV_SYMBOL_WARNING;
+    label.color   = lv_color_hex(0xFFFFFF);
+    label.align   = LV_TEXT_ALIGN_CENTER;
+    int32_t tx1 = coords.x1 + 8;
+    int32_t tx2 = coords.x2 - 22 - 8;
+    int32_t cx  = (coords.x1 + coords.x2) / 2;
+    /* keep the centered area inside the text region (left of the LED) */
+    lv_area_t la = { cx - ((tx2 - tx1) / 2), cy - 10, cx + ((tx2 - tx1) / 2), cy + 10 };
     lv_draw_label(layer, &label, &la);
 }
 
@@ -1292,9 +1297,25 @@ typedef struct {
     hmi_btn_t * btn_start;
     hmi_btn_t * btn_stop;
     hmi_btn_t * btn_reset;
+    lv_obj_t * btn_destroy;
 
     lv_obj_t * info_label;
     lv_obj_t * status_label;
+    lv_obj_t * online_dot;
+
+    lv_obj_t * frame_hex_label;
+    lv_obj_t * frame_caption;
+
+    card_t * card_cmd;
+    card_t * card_crc;
+    card_t * card_busy;
+    card_t * card_fault;
+
+    uint32_t frames_sent;
+    uint32_t crc_ok;
+    bool fault;
+    bool busy;
+    float pulse;
 
     float freq;
     float mag;
@@ -1325,6 +1346,61 @@ static void control_refresh_timer(lv_timer_t * timer)
     (void)timer;
     hmi_gauge_set_value(ctl.gauge_freq, ctl.freq);
     hmi_gauge_set_value(ctl.gauge_mag, ctl.mag);
+
+    ctl.pulse += 0.06f;
+    if (ctl.pulse > 1.0f) ctl.pulse -= 1.0f;
+
+    /* Pulsing ONLINE status dot in the header. */
+    if (ctl.online_dot) {
+        lv_opa_t opa = 80 + (lv_opa_t)(hmi_pulse_brightness(ctl.pulse) * 140);
+        lv_obj_set_style_bg_opa(ctl.online_dot, opa, 0);
+        lv_obj_set_style_shadow_opa(ctl.online_dot, opa / 2, 0);
+        lv_obj_invalidate(ctl.online_dot);
+    }
+
+    /* Recompute the current 8-byte SVPWM SPI frame (mirrors slave_ctl.c). */
+    uint8_t frame[8];
+    frame[0] = 0xAA;                                   /* magic */
+    frame[1] = ctl.running ? 0x02 : 0x01;              /* cmd START/REF */
+    uint16_t f = (uint16_t)(ctl.freq * 100.0f);        /* big-endian */
+    frame[2] = (uint8_t)(f >> 8);
+    frame[3] = (uint8_t)(f & 0xFF);
+    uint16_t m = (uint16_t)(ctl.mag * 100.0f);         /* big-endian */
+    frame[4] = (uint8_t)(m >> 8);
+    frame[5] = (uint8_t)(m & 0xFF);
+    frame[6] = frame[0] ^ frame[1] ^ frame[2] ^ frame[3] ^ frame[4] ^ frame[5];
+    frame[7] = 0x55;                                   /* tail */
+
+    if (ctl.frame_hex_label) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), LV_SYMBOL_SHUFFLE "  %02X %02X %02X %02X %02X %02X %02X %02X",
+                 frame[0], frame[1], frame[2], frame[3],
+                 frame[4], frame[5], frame[6], frame[7]);
+        lv_label_set_text(ctl.frame_hex_label, buf);
+    }
+
+    /* Status counters: simulate a small exchange budget each tick so the
+     * cards feel alive while the real SPI traffic stays in main.c. */
+    ctl.frames_sent += 1;
+    if (ctl.frames_sent % 3 == 0) ctl.crc_ok += 1;
+    ctl.busy = ((ctl.frames_sent / 5) % 2) == 0;
+
+    if (ctl.card_cmd) {
+        card_set_state(ctl.card_cmd, ctl.running ? IVC2_STATE_RUNNING : IVC2_STATE_READY);
+        card_set_value(ctl.card_cmd, (float)frame[1]);
+    }
+    if (ctl.card_crc) {
+        card_set_state(ctl.card_crc, IVC2_STATE_RUNNING);
+        card_set_value(ctl.card_crc, (float)(ctl.crc_ok % 1000));
+    }
+    if (ctl.card_busy) {
+        card_set_state(ctl.card_busy, ctl.busy ? IVC2_STATE_WARNING : IVC2_STATE_RUNNING);
+        card_set_value(ctl.card_busy, ctl.busy ? 1.0f : 0.0f);
+    }
+    if (ctl.card_fault) {
+        card_set_state(ctl.card_fault, ctl.fault ? IVC2_STATE_FAULT : IVC2_STATE_RUNNING);
+        card_set_value(ctl.card_fault, ctl.fault ? 1.0f : 0.0f);
+    }
 }
 
 static void control_on_freq_change(hmi_slider_t * slider, float value)
@@ -1357,7 +1433,7 @@ static void control_on_start(hmi_btn_t * btn, lv_event_t * e)
     hmi_btn_set_state(btn, HMI_BTN_ACTIVE);
     hmi_btn_set_state(ctl.btn_stop, HMI_BTN_IDLE);
     hmi_btn_set_state(ctl.btn_reset, HMI_BTN_IDLE);
-    lv_label_set_text(ctl.status_label, LV_SYMBOL_PLAY " RUNNING");
+    lv_label_set_text(ctl.status_label, LV_SYMBOL_PLAY " UP");
     lv_obj_set_style_text_color(ctl.status_label, COLOR_OK, 0);
     lv_label_set_text(ctl.info_label, LV_SYMBOL_PLAY " SYNC: start requested");
     lv_obj_set_style_text_color(ctl.info_label, COLOR_OK, 0);
@@ -1371,7 +1447,7 @@ static void control_on_stop(hmi_btn_t * btn, lv_event_t * e)
     hmi_btn_set_state(btn, HMI_BTN_ACTIVE);
     hmi_btn_set_state(ctl.btn_start, HMI_BTN_IDLE);
     hmi_btn_set_state(ctl.btn_reset, HMI_BTN_IDLE);
-    lv_label_set_text(ctl.status_label, LV_SYMBOL_STOP " STOPPED");
+    lv_label_set_text(ctl.status_label, LV_SYMBOL_STOP " DOWN");
     lv_obj_set_style_text_color(ctl.status_label, COLOR_ERROR, 0);
     lv_label_set_text(ctl.info_label, LV_SYMBOL_STOP " SYNC: stop requested");
     lv_obj_set_style_text_color(ctl.info_label, COLOR_ERROR, 0);
@@ -1391,10 +1467,38 @@ static void control_on_reset(hmi_btn_t * btn, lv_event_t * e)
     hmi_slider_set_value(ctl.slider_freq, ctl.freq);
     hmi_slider_set_value(ctl.slider_mag, ctl.mag);
 
-    lv_label_set_text(ctl.status_label, LV_SYMBOL_REFRESH " RESET 60Hz / 4V");
+    lv_label_set_text(ctl.status_label, LV_SYMBOL_REFRESH " RESET");
     lv_obj_set_style_text_color(ctl.status_label, COLOR_WARN, 0);
     lv_label_set_text(ctl.info_label, LV_SYMBOL_REFRESH " Reset reference -> 60 Hz, 4.0 V");
     lv_obj_set_style_text_color(ctl.info_label, COLOR_WARN, 0);
+}
+
+/* The big red emergency button transplanted from the complex demo screen.
+ * It keeps the hazard styling but acts as an emergency stop in the control
+ * context: forces the controller off, zeroes the reference and flags a fault
+ * (rather than tearing down the live UI). */
+static void control_on_destroy(lv_event_t * e)
+{
+    (void)e;
+    ctl.running = false;
+    ctl.freq = 0.0f;
+    ctl.mag = 0.0f;
+    ctl.fault = true;
+    ctl.busy = false;
+    ctl.frames_sent = 0;
+    ctl.crc_ok = 0;
+    hmi_ctl_dirty = true;
+
+    hmi_btn_set_state(ctl.btn_start, HMI_BTN_IDLE);
+    hmi_btn_set_state(ctl.btn_stop, HMI_BTN_IDLE);
+    hmi_btn_set_state(ctl.btn_reset, HMI_BTN_IDLE);
+    hmi_slider_set_value(ctl.slider_freq, ctl.freq);
+    hmi_slider_set_value(ctl.slider_mag, ctl.mag);
+
+    lv_label_set_text(ctl.status_label, LV_SYMBOL_WARNING " FAULT");
+    lv_obj_set_style_text_color(ctl.status_label, COLOR_ERROR, 0);
+    lv_label_set_text(ctl.info_label, LV_SYMBOL_WARNING " EMERGENCY STOP - ref zeroed");
+    lv_obj_set_style_text_color(ctl.info_label, COLOR_ERROR, 0);
 }
 
 static lv_obj_t * control_badge(lv_obj_t * parent, const char * text, lv_color_t color)
@@ -1403,7 +1507,7 @@ static lv_obj_t * control_badge(lv_obj_t * parent, const char * text, lv_color_t
     lv_obj_remove_style_all(badge);
     lv_obj_set_style_bg_color(badge, COLOR_PANEL, 0);
     lv_obj_set_style_radius(badge, 10, 0);
-    lv_obj_set_style_pad_hor(badge, 12, 0);
+    lv_obj_set_style_pad_hor(badge, 8, 0);
     lv_obj_set_height(badge, 30);
 
     lv_obj_t * lbl = lv_label_create(badge);
@@ -1411,6 +1515,103 @@ static lv_obj_t * control_badge(lv_obj_t * parent, const char * text, lv_color_t
     lv_obj_set_style_text_color(lbl, color, 0);
     lv_obj_center(lbl);
     return badge;
+}
+
+/* A subtle 1px horizontal divider used to structure content regions inside
+ * the nested control panels. */
+static lv_obj_t * control_divider(lv_obj_t * parent)
+{
+    lv_obj_t * line = lv_obj_create(parent);
+    lv_obj_remove_style_all(line);
+    lv_obj_set_size(line, lv_pct(88), 1);
+    lv_obj_set_style_bg_color(line, COLOR_PANEL_BORDER, 0);
+    lv_obj_set_style_bg_opa(line, LV_OPA_60, 0);
+    lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
+    return line;
+}
+
+/* Builds a rounded bordered "panel": an accent top-strip + title bar (small
+ * colored dot + uppercase label) + a returned content container. This is the
+ * shared building block that gives the layout its grouped, card-like depth.
+ * Both control panels are sized to half of their (row-flex) parent. */
+static lv_obj_t * control_panel(lv_obj_t * parent, const char * title, lv_color_t dot_color,
+                                int32_t width_pct)
+{
+    lv_obj_t * panel = lv_obj_create(parent);
+    lv_obj_remove_style_all(panel);
+    lv_obj_set_size(panel, lv_pct(width_pct), lv_pct(100));
+    lv_obj_set_style_bg_color(panel, COLOR_PANEL, 0);
+    lv_obj_set_style_radius(panel, 16, 0);
+    lv_obj_set_style_border_color(panel, COLOR_PANEL_BORDER, 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_border_opa(panel, LV_OPA_50, 0);
+    lv_obj_set_style_shadow_color(panel, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_width(panel, 18, 0);
+    lv_obj_set_style_shadow_opa(panel, LV_OPA_50, 0);
+    lv_obj_set_style_pad_all(panel, 10, 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(panel, 8, 0);
+
+    /* Accent top strip -- a slim colored handle that gives the panel an edge. */
+    lv_obj_t * strip = lv_obj_create(panel);
+    lv_obj_remove_style_all(strip);
+    lv_obj_set_size(strip, LV_SIZE_CONTENT, 3);
+    lv_obj_set_width(strip, lv_pct(100));
+    lv_obj_set_style_bg_color(strip, dot_color, 0);
+    lv_obj_set_style_radius(strip, 2, 0);
+    lv_obj_clear_flag(strip, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Optional title bar (dot + label). A NULL title omits it so the content
+     * container reclaims the vertical space (used by the hero-gauge zone). */
+    if (title != NULL) {
+        lv_obj_t * title_row = lv_obj_create(panel);
+        lv_obj_remove_style_all(title_row);
+        lv_obj_set_size(title_row, lv_pct(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(title_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(title_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(title_row, 8, 0);
+        lv_obj_clear_flag(title_row, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t * dot = lv_obj_create(title_row);
+        lv_obj_remove_style_all(dot);
+        lv_obj_set_size(dot, 10, 10);
+        lv_obj_set_style_bg_color(dot, dot_color, 0);
+        lv_obj_set_style_radius(dot, 5, 0);
+        lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t * lbl = lv_label_create(title_row);
+        lv_label_set_text(lbl, title);
+        lv_obj_set_style_text_color(lbl, COLOR_TEXT, 0);
+    }
+
+    /* Body container that callers populate (gauges, sliders, cards...).
+     * Fixed px height so children keep their explicit sizes; it scrolls only
+     * if content overflows, and centers items that leave free space. */
+    lv_obj_t * body = lv_obj_create(panel);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_size(body, lv_pct(100), lv_pct(100));
+    lv_obj_set_flex_grow(body, 1);
+    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(body, 8, 0);
+    lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+
+    return body;
+}
+
+/* A small vertical bar that appears next to the "ONLINE" status in the header,
+ * pulsing via the refresh timer. */
+static lv_obj_t * control_online_dot(lv_obj_t * parent)
+{
+    lv_obj_t * dot = lv_obj_create(parent);
+    lv_obj_remove_style_all(dot);
+    lv_obj_set_size(dot, 12, 12);
+    lv_obj_set_style_bg_color(dot, COLOR_OK, 0);
+    lv_obj_set_style_radius(dot, 6, 0);
+    lv_obj_set_style_shadow_color(dot, COLOR_OK, 0);
+    lv_obj_set_style_shadow_width(dot, 8, 0);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+    return dot;
 }
 
 void hmi_create_control(lv_obj_t * parent)
@@ -1426,14 +1627,14 @@ void hmi_create_control(lv_obj_t * parent)
     lv_obj_set_style_pad_row(cont, 8, 0);
     ctl.root = cont;
 
-    /* Header */
+    /*============ Header rail ============*/
     lv_obj_t * header = lv_obj_create(cont);
     lv_obj_remove_style_all(header);
-    lv_obj_set_size(header, lv_pct(100), 56);
+    lv_obj_set_size(header, lv_pct(100), 52);
     lv_obj_set_flex_grow(header, 0);
     lv_obj_set_style_bg_color(header, COLOR_PANEL, 0);
     lv_obj_set_style_radius(header, 12, 0);
-    lv_obj_set_style_pad_hor(header, 14, 0);
+    lv_obj_set_style_pad_hor(header, 10, 0);
     lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
@@ -1448,53 +1649,75 @@ void hmi_create_control(lv_obj_t * parent)
     lv_obj_remove_flag(header_right, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(header_right, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(header_right, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(header_right, 8, 0);
+    lv_obj_set_style_pad_column(header_right, 6, 0);
 
+    /* Pulsing green ONLINE dot + status label */
+    ctl.online_dot = control_online_dot(header_right);
     ctl.status_label = lv_label_create(header_right);
     lv_label_set_text(ctl.status_label, LV_SYMBOL_STOP " IDLE");
     lv_obj_set_style_text_color(ctl.status_label, COLOR_DIM, 0);
 
-    control_badge(header_right, "SPI4 SLAVE", COLOR_OK);
-    control_badge(header_right, "G474RE", COLOR_ACCENT);
+    control_badge(header_right, "H7S78", COLOR_ACCENT);
 
-    /* Gauges row */
-    lv_obj_t * gauge_row = lv_obj_create(cont);
-    lv_obj_remove_style_all(gauge_row);
-    lv_obj_set_size(gauge_row, lv_pct(100), lv_pct(100));
-    lv_obj_set_flex_grow(gauge_row, 1);
-    lv_obj_set_flex_flow(gauge_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(gauge_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    /*============ Workspace: asymmetric left/right zones ============*/
+    lv_obj_t * workspace = lv_obj_create(cont);
+    lv_obj_remove_style_all(workspace);
+    lv_obj_set_size(workspace, lv_pct(100), lv_pct(100));
+    lv_obj_set_flex_grow(workspace, 1);
+    lv_obj_set_flex_flow(workspace, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(workspace, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(workspace, 8, 0);
 
-    ctl.gauge_freq = hmi_gauge_create(gauge_row);
+    /* ---- Left zone: the hero gauges (pure visualization, dominant) ----
+     * No panel title so the two FREQ + MAG dials own the whole panel. They are
+     * big SQUARES filling the full height; if there is not enough horizontal
+     * room the container scrolls to keep the oversized dials fully visible. */
+    lv_obj_t * left_panel = control_panel(workspace, NULL, COLOR_ACCENT, 58);
+    lv_obj_set_flex_flow(left_panel, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(left_panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(left_panel, 8, 0);
+    /* Re-enable scrolling (the panel helper clears it) so square gauges that
+     * overflow the row width can be panned into view. */
+    lv_obj_add_flag(left_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(left_panel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scroll_dir(left_panel, LV_DIR_HOR);
+
+    /* Each dial is a square with side == the container height. With the title
+     * hidden the body gets the full panel height, so the dial can be larger. */
+    const int32_t gauge_side = 300;
+    lv_obj_set_height(left_panel, gauge_side);
+    /* Do not stretch the body taller than the square side, or the dials would
+     * stop being square (flex-grow would override the fixed height). */
+    lv_obj_set_style_flex_grow(left_panel, 0, 0);
+
+    ctl.gauge_freq = hmi_gauge_create(left_panel);
     hmi_gauge_set_style(ctl.gauge_freq, HMI_GAUGE_STYLE_CYAN);
     hmi_gauge_set_title(ctl.gauge_freq, "FREQUENCY");
     hmi_gauge_set_unit(ctl.gauge_freq, "Hz");
     hmi_gauge_set_range(ctl.gauge_freq, 0.0f, 400.0f);
     hmi_gauge_set_precision(ctl.gauge_freq, 1);
     hmi_gauge_set_tick_count(ctl.gauge_freq, 9);
+    hmi_gauge_set_peak_enable(ctl.gauge_freq, true);
     hmi_gauge_set_value(ctl.gauge_freq, 60.0f);
-    lv_obj_set_size(hmi_gauge_get_obj(ctl.gauge_freq), lv_pct(45), lv_pct(100));
+    lv_obj_set_size(hmi_gauge_get_obj(ctl.gauge_freq), gauge_side, LV_PCT(100));
 
-    ctl.gauge_mag = hmi_gauge_create(gauge_row);
+    ctl.gauge_mag = hmi_gauge_create(left_panel);
     hmi_gauge_set_style(ctl.gauge_mag, HMI_GAUGE_STYLE_PINK);
     hmi_gauge_set_title(ctl.gauge_mag, "MAGNITUDE");
     hmi_gauge_set_unit(ctl.gauge_mag, "V");
     hmi_gauge_set_range(ctl.gauge_mag, 0.0f, 5.0f);
     hmi_gauge_set_precision(ctl.gauge_mag, 2);
     hmi_gauge_set_tick_count(ctl.gauge_mag, 6);
+    hmi_gauge_set_peak_enable(ctl.gauge_mag, true);
     hmi_gauge_set_value(ctl.gauge_mag, 4.0f);
-    lv_obj_set_size(hmi_gauge_get_obj(ctl.gauge_mag), lv_pct(45), lv_pct(100));
+    lv_obj_set_size(hmi_gauge_get_obj(ctl.gauge_mag), gauge_side, LV_PCT(100));
 
-    /* Control sliders */
-    lv_obj_t * slider_row = lv_obj_create(cont);
-    lv_obj_remove_style_all(slider_row);
-    lv_obj_set_size(slider_row, lv_pct(100), 96);
-    lv_obj_set_flex_grow(slider_row, 0);
-    lv_obj_set_style_pad_column(slider_row, 8, 0);
-    lv_obj_set_flex_flow(slider_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(slider_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    /* ---- Right zone: controls + telemetry (narrower, dense) ----
+     * Both sliders live together here, separated from their gauges, plus the
+     * SPI frame readout and a compact 2x2 status-card grid. */
+    lv_obj_t * right_panel = control_panel(workspace, "CONTROL / STATUS", COLOR_MAGENTA, 42);
 
-    ctl.slider_freq = hmi_slider_create(slider_row);
+    ctl.slider_freq = hmi_slider_create(right_panel);
     hmi_slider_set_title(ctl.slider_freq, "FREQUENCY");
     hmi_slider_set_unit(ctl.slider_freq, "Hz");
     hmi_slider_set_range(ctl.slider_freq, 0.0f, 400.0f);
@@ -1502,24 +1725,101 @@ void hmi_create_control(lv_obj_t * parent)
     hmi_slider_set_color(ctl.slider_freq, COLOR_ACCENT);
     hmi_slider_set_value(ctl.slider_freq, 60.0f);
     hmi_slider_on_change(ctl.slider_freq, control_on_freq_change);
-    lv_obj_set_size(hmi_slider_get_obj(ctl.slider_freq), lv_pct(46), lv_pct(100));
+    lv_obj_set_size(hmi_slider_get_obj(ctl.slider_freq), lv_pct(100), 58);
 
-    ctl.slider_mag = hmi_slider_create(slider_row);
+    ctl.slider_mag = hmi_slider_create(right_panel);
     hmi_slider_set_title(ctl.slider_mag, "VOLTAGE MAG");
     hmi_slider_set_unit(ctl.slider_mag, "V");
     hmi_slider_set_range(ctl.slider_mag, 0.0f, 5.0f);
     hmi_slider_set_precision(ctl.slider_mag, 2);
-    hmi_slider_set_color(ctl.slider_mag, COLOR_ACCENT);
+    hmi_slider_set_color(ctl.slider_mag, COLOR_MAGENTA);
     hmi_slider_set_value(ctl.slider_mag, 4.0f);
     hmi_slider_on_change(ctl.slider_mag, control_on_mag_change);
-    lv_obj_set_size(hmi_slider_get_obj(ctl.slider_mag), lv_pct(46), lv_pct(100));
+    lv_obj_set_size(hmi_slider_get_obj(ctl.slider_mag), lv_pct(100), 58);
 
-    /* Buttons */
-    lv_obj_t * btn_row = lv_obj_create(cont);
+    control_divider(right_panel);
+
+    /* Live SPI frame readout. */
+    lv_obj_t * frame_box = lv_obj_create(right_panel);
+    lv_obj_remove_style_all(frame_box);
+    lv_obj_set_size(frame_box, lv_pct(100), 50);
+    lv_obj_set_flex_flow(frame_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(frame_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(frame_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(frame_box, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(frame_box, LV_SCROLLBAR_MODE_AUTO);
+
+    ctl.frame_hex_label = lv_label_create(frame_box);
+    lv_label_set_text(ctl.frame_hex_label, LV_SYMBOL_SHUFFLE "  AA 01 17 70 01 90 1F 55");
+    lv_obj_set_style_text_color(ctl.frame_hex_label, COLOR_OK, 0);
+    lv_obj_set_style_text_align(ctl.frame_hex_label, LV_TEXT_ALIGN_CENTER, 0);
+
+    ctl.frame_caption = lv_label_create(frame_box);
+    lv_label_set_long_mode(ctl.frame_caption, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(ctl.frame_caption, lv_pct(100));
+    lv_label_set_text(ctl.frame_caption, "magic 0xAA | cmd 0x01 REF | freq/100 BE | CRC b0..b5 | tail 0x55");
+    lv_obj_set_style_text_color(ctl.frame_caption, COLOR_DIM, 0);
+    lv_obj_set_style_text_align(ctl.frame_caption, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_letter_space(ctl.frame_caption, 0, 0);
+
+    control_divider(right_panel);
+
+    /* 4-up status card row. */
+    lv_obj_t * card_grid = lv_obj_create(right_panel);
+    lv_obj_remove_style_all(card_grid);
+    lv_obj_set_size(card_grid, lv_pct(100), 52);
+    lv_obj_set_flex_flow(card_grid, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(card_grid, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(card_grid, LV_OBJ_FLAG_SCROLLABLE);
+
+    ctl.card_cmd = card_create(card_grid);
+    card_set_unit(ctl.card_cmd, "");
+    card_set_range(ctl.card_cmd, 0, 3);
+    card_set_precision(ctl.card_cmd, 0);
+    card_set_state(ctl.card_cmd, IVC2_STATE_READY);
+    lv_obj_set_size(card_get_object(ctl.card_cmd), lv_pct(23), lv_pct(100));
+    lv_obj_t * child = lv_obj_get_child(card_get_object(ctl.card_cmd), 0);
+    if (child) lv_label_set_text(child, "CMD");
+
+    ctl.card_crc = card_create(card_grid);
+    card_set_unit(ctl.card_crc, "");
+    card_set_range(ctl.card_crc, 0, 999);
+    card_set_precision(ctl.card_crc, 0);
+    card_set_state(ctl.card_crc, IVC2_STATE_RUNNING);
+    lv_obj_set_size(card_get_object(ctl.card_crc), lv_pct(23), lv_pct(100));
+    child = lv_obj_get_child(card_get_object(ctl.card_crc), 0);
+    if (child) lv_label_set_text(child, "CRC");
+
+    ctl.card_busy = card_create(card_grid);
+    card_set_unit(ctl.card_busy, "");
+    card_set_range(ctl.card_busy, 0, 1);
+    card_set_precision(ctl.card_busy, 0);
+    card_set_state(ctl.card_busy, IVC2_STATE_RUNNING);
+    lv_obj_set_size(card_get_object(ctl.card_busy), lv_pct(23), lv_pct(100));
+    child = lv_obj_get_child(card_get_object(ctl.card_busy), 0);
+    if (child) lv_label_set_text(child, "BUSY");
+
+    ctl.card_fault = card_create(card_grid);
+    card_set_unit(ctl.card_fault, "");
+    card_set_range(ctl.card_fault, 0, 1);
+    card_set_precision(ctl.card_fault, 0);
+    card_set_state(ctl.card_fault, IVC2_STATE_RUNNING);
+    lv_obj_set_size(card_get_object(ctl.card_fault), lv_pct(23), lv_pct(100));
+    child = lv_obj_get_child(card_get_object(ctl.card_fault), 0);
+    if (child) lv_label_set_text(child, "FAULT");
+
+    /*============ Footer rail: control buttons + info scroll ============*/
+    lv_obj_t * footer = lv_obj_create(cont);
+    lv_obj_remove_style_all(footer);
+    lv_obj_set_size(footer, lv_pct(100), 64);
+    lv_obj_set_flex_grow(footer, 0);
+    lv_obj_set_style_pad_column(footer, 8, 0);
+    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t * btn_row = lv_obj_create(footer);
     lv_obj_remove_style_all(btn_row);
-    lv_obj_set_size(btn_row, lv_pct(100), 64);
-    lv_obj_set_flex_grow(btn_row, 0);
-    lv_obj_set_style_pad_column(btn_row, 8, 0);
+    lv_obj_set_size(btn_row, 520, lv_pct(90));
     lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
@@ -1529,28 +1829,48 @@ void hmi_create_control(lv_obj_t * parent)
     hmi_btn_set_led_color(ctl.btn_start, COLOR_OK);
     hmi_btn_set_pulse_enable(ctl.btn_start, true);
     hmi_btn_on_click(ctl.btn_start, control_on_start);
-    lv_obj_set_size(hmi_btn_get_obj(ctl.btn_start), lv_pct(30), lv_pct(90));
+    lv_obj_set_size(hmi_btn_get_obj(ctl.btn_start), lv_pct(18), lv_pct(90));
 
     ctl.btn_stop = hmi_btn_create(btn_row);
     hmi_btn_set_text(ctl.btn_stop, "STOP");
     hmi_btn_set_led_enable(ctl.btn_stop, true);
     hmi_btn_set_led_color(ctl.btn_stop, COLOR_ERROR);
     hmi_btn_on_click(ctl.btn_stop, control_on_stop);
-    lv_obj_set_size(hmi_btn_get_obj(ctl.btn_stop), lv_pct(30), lv_pct(90));
+    lv_obj_set_size(hmi_btn_get_obj(ctl.btn_stop), lv_pct(18), lv_pct(90));
 
     ctl.btn_reset = hmi_btn_create(btn_row);
     hmi_btn_set_text(ctl.btn_reset, "RESET");
     hmi_btn_set_led_enable(ctl.btn_reset, true);
     hmi_btn_set_led_color(ctl.btn_reset, COLOR_WARN);
     hmi_btn_on_click(ctl.btn_reset, control_on_reset);
-    lv_obj_set_size(hmi_btn_get_obj(ctl.btn_reset), lv_pct(30), lv_pct(90));
+    lv_obj_set_size(hmi_btn_get_obj(ctl.btn_reset), lv_pct(18), lv_pct(90));
 
-    /* Info footer */
-    ctl.info_label = lv_label_create(cont);
-    lv_obj_set_size(ctl.info_label, lv_pct(100), 24);
-    lv_obj_set_flex_grow(ctl.info_label, 0);
+    /* Big red emergency button (transplanted from the complex demo screen).
+     * Wider than the standard buttons so the whole DESTROY label stays on one
+     * line. Width is asymmetric vs. the gauge row on purpose. */
+    ctl.btn_destroy = lv_obj_create(btn_row);
+    lv_obj_remove_style_all(ctl.btn_destroy);
+    lv_obj_set_size(ctl.btn_destroy, 180, lv_pct(90));
+    lv_obj_add_event_cb(ctl.btn_destroy, destroy_btn_draw, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_add_event_cb(ctl.btn_destroy, on_destroy_press, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(ctl.btn_destroy, on_destroy_release, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ctl.btn_destroy, control_on_destroy, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(ctl.btn_destroy, LV_OBJ_FLAG_CLICKABLE);
+
+    /* Divider between buttons and the scrolling info readout. */
+    lv_obj_t * vdiv = lv_obj_create(footer);
+    lv_obj_remove_style_all(vdiv);
+    lv_obj_set_size(vdiv, 1, lv_pct(60));
+    lv_obj_set_style_bg_color(vdiv, COLOR_PANEL_BORDER, 0);
+    lv_obj_set_style_bg_opa(vdiv, LV_OPA_60, 0);
+    lv_obj_clear_flag(vdiv, LV_OBJ_FLAG_SCROLLABLE);
+
+    ctl.info_label = lv_label_create(footer);
+    lv_obj_set_flex_grow(ctl.info_label, 1);
+    lv_obj_set_size(ctl.info_label, lv_pct(100), lv_pct(80));
     lv_label_set_long_mode(ctl.info_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_width(ctl.info_label, lv_pct(100));
+    lv_obj_set_style_text_font(ctl.info_label, &lv_font_montserrat_20, 0);
     lv_label_set_text(ctl.info_label, LV_SYMBOL_DRIVE " Drag sliders to set SVPWM reference, then START");
     lv_obj_set_style_text_color(ctl.info_label, COLOR_DIM, 0);
 
